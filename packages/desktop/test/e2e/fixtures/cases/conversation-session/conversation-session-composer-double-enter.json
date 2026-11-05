@@ -4,7 +4,7 @@
   "spec": "./test/e2e/conversation-session/conversation-session-composer-double-enter.test.ts",
   "providerFixtures": [
     "./test/e2e/fixtures/upstream/common.json",
-    "./test/e2e/fixtures/upstream/conversation-session/conversation-session-composer-settlement.json"
+    "./test/e2e/fixtures/upstream/conversation-session/conversation-session-composer-double-enter.json"
   ],
   "fileFixtures": [],
   "requests": [
