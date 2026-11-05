@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "caseName": "conversation-session-composer-double-enter",
+  "spec": "./test/e2e/conversation-session/conversation-session-composer-double-enter.test.ts",
+  "providerFixtures": [
+    "./test/e2e/fixtures/upstream/common.json",
+    "./test/e2e/fixtures/upstream/conversation-session/conversation-session-composer-settlement.json"
+  ],
+  "fileFixtures": [],
+  "requests": [
+    {
+      "id": "conversation-session-composer-double-enter-title-sidecar",
+      "kind": "common",
+      "source": "synthetic",
+      "timingPolicy": "fast-text",
+      "syntheticReason": "复用 composer-settlement 的标题旁路固定响应，避免依赖 legacy fixture 或触发后台网络重试。"
+    },
+    {
+      "id": "composer-double-enter",
+      "kind": "main",
+      "source": "synthetic",
+      "timingPolicy": "fast-text",
+      "syntheticReason": "只控制真实发送 RPC 与查询的先后顺序；暂扣 sendText 使提交竞态窗口可稳定进入，回执仍由 Host/CLI 真实产生。"
+    }
+  ]
+}
