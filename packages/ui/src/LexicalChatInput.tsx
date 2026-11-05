@@ -522,6 +522,7 @@ function KeyboardPlugin({
   submitDisabled,
   allowSubmitWhenEmpty,
   enterSubmits,
+  swallowEnterWhileSubmitting,
 }: {
   onSubmit: (text: string) => LexicalSubmitResult;
   onModifiedSubmit?: (text: string) => LexicalSubmitResult;
@@ -529,6 +530,8 @@ function KeyboardPlugin({
   submitDisabled?: boolean;
   allowSubmitWhenEmpty?: boolean;
   enterSubmits: boolean;
+  /** submitDisabled 且正文仍是冻结的在途提交（或已空）时吞掉裸 Enter，防止残留换行。 */
+  swallowEnterWhileSubmitting?: (currentText: string) => boolean;
 }) {
   const [editor] = useLexicalComposerContext();
   // 作用域改绑层：读生效表的 composer 命令切片；ref 透传避免按键监听重挂。
@@ -541,6 +544,9 @@ function KeyboardPlugin({
     composerSend: effectiveShortcutBindings.composerSend ?? [],
     composerInsertNewline: effectiveShortcutBindings.composerInsertNewline ?? [],
   };
+  // 吞键判定同样走 ref 透传：判定函数随业务层 pending/inFlight ref 变化，不应重挂键盘监听。
+  const swallowEnterWhileSubmittingRef = useRef(swallowEnterWhileSubmitting);
+  swallowEnterWhileSubmittingRef.current = swallowEnterWhileSubmitting;
 
   useEffect(() => {
     const unregisterEnter = editor.registerCommand(
@@ -575,6 +581,13 @@ function KeyboardPlugin({
             // 与主链裸 Enter 等价的门禁：无修饰组合受 submitDisabled / 手机视口 enterSubmits；
             // 带修饰组合不受视口门禁（与主链 onModifiedSubmit 路径一致）。
             if (submitDisabled || (!modifiedScopedEnter && !enterSubmits)) {
+              // 发送窗口内且正文仍是冻结的在途提交（或已空）→ 吞掉 Enter：
+              // 普通发送路径此时还没清空编辑器，放行 Lexical 会把换行插进刚发出的正文，
+              // 且 revision 推进会让 composer 的结算门禁跳过清空（正文+换行残留）。
+              if (submitDisabled && swallowEnterWhileSubmittingRef.current?.(text)) {
+                event.preventDefault();
+                return true;
+              }
               return false;
             }
             event.preventDefault();
@@ -633,7 +646,13 @@ function KeyboardPlugin({
         // 当前请求进行中时，输入框仍允许继续编辑草稿，但此时不能再次提交。
         // 之前把状态直接映射成 disabled，导致输入和联想面板一起失效；如果只去掉 disabled，
         // Enter 又会误触发 submit 并清空草稿。这里在 submitDisabled 时把 Enter 退回给 Lexical 处理换行。
+        // 例外：正文仍是冻结的在途提交（或已空）时吞掉 Enter，否则换行会插进
+        // 尚未清空的已发正文里并阻断 composer 的结算清空（双击回车残留 bug）。
         if (submitDisabled || !enterSubmits) {
+          if (submitDisabled && swallowEnterWhileSubmittingRef.current?.(text)) {
+            event.preventDefault();
+            return true;
+          }
           return false;
         }
 
@@ -1443,6 +1462,13 @@ interface LexicalChatInputProps {
   placeholder?: string;
   disabled?: boolean;
   submitDisabled?: boolean;
+  /**
+   * 发送窗口内的裸 Enter 吞键判定：submitDisabled 且该函数返回 true 时，
+   * Enter 被消费（不提交、不落 Lexical 默认换行）。业务层用「正文 === 在途提交冻结正文或为空」
+   * 实现，防止双击回车把换行插进尚未清空的已发正文并阻断结算清空；
+   * 用户已续写新草稿（内容变化）时返回 false，保留「进行中可换行续写」的原有设计。
+   */
+  swallowEnterWhileSubmitting?: (currentText: string) => boolean;
   allowSubmitWhenEmpty?: boolean;
   enterSubmits?: boolean;
   onSubmit: (text: string) => LexicalSubmitResult;
@@ -1480,6 +1506,7 @@ export function LexicalChatInput({
   placeholder,
   disabled = false,
   submitDisabled = false,
+  swallowEnterWhileSubmitting,
   allowSubmitWhenEmpty = false,
   enterSubmits = true,
   onSubmit,
@@ -1640,6 +1667,7 @@ export function LexicalChatInput({
             onModifiedSubmit={onModifiedSubmit}
             disabled={disabled}
             submitDisabled={submitDisabled}
+            swallowEnterWhileSubmitting={swallowEnterWhileSubmitting}
             allowSubmitWhenEmpty={allowSubmitWhenEmpty}
             enterSubmits={enterSubmits}
           />

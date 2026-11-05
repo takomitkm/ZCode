@@ -750,6 +750,9 @@ function ConversationComposerImpl({
   const textRef = useRef("");
   const contentRevisionRef = useRef(0);
   const pendingRef = useRef(false);
+  // 在途提交冻结的正文：submit 受理时写入、finally 清空。
+  // 供 LexicalChatInput 的 swallowEnterWhileSubmitting 判定「Enter 是否落在发送窗口内」。
+  const inFlightSubmittedTextRef = useRef<string | null>(null);
   const uiStore = useContext(StoreContext);
   const snapshotRef = useRef(snapshot);
   snapshotRef.current = snapshot;
@@ -1522,6 +1525,7 @@ function ConversationComposerImpl({
         workspaceKind: workspaceIdentity?.trim() ? "remote" : "local",
       });
       pendingRef.current = true;
+      inFlightSubmittedTextRef.current = submittedDraft.text;
       setPending(true);
       // Bug 根因：草稿 intent 只保存用户显式改动，正常继承模型位于冻结初始化 config。
       // prewarm snapshot 尚未到达时若只读 draftConfig，send_btn 会错误落成空模型/glm。
@@ -1839,6 +1843,7 @@ function ConversationComposerImpl({
         sendAction.fail({ failureStage: "composer_send" });
       } finally {
         pendingRef.current = false;
+        inFlightSubmittedTextRef.current = null;
         setPending(false);
       }
     },
@@ -1920,6 +1925,17 @@ function ConversationComposerImpl({
       sessionId: sessionId ?? null,
     });
   }, [conversationTelemetry, sessionId]);
+
+  // 发送窗口内吞掉裸 Enter：此时普通发送路径尚未乐观清空，编辑器里还是刚发出的正文，
+  // Enter 落到 Lexical 默认行为会插入换行，并把 contentRevision 推过 cleanupRevision，
+  // 结算门禁随后跳过清空 → 「消息已发出但正文+换行残留输入框」。
+  // 仅当编辑器内容仍是冻结的那份（或已空）才吞；用户已开始续写新草稿则照常换行。
+  const swallowEnterWhileSubmitting = useCallback(
+    (currentText: string) =>
+      inFlightSubmittedTextRef.current !== null &&
+      (currentText === inFlightSubmittedTextRef.current || currentText.trim() === ""),
+    [],
+  );
 
   // 编辑器提交（Enter / 发送键 form submit 同路径）。返回 false：编辑器不自行 reset，
   // 由 submit 成功后经 inputApiRef.clear() 清空——失败时草稿留在输入框。
@@ -2837,6 +2853,7 @@ function ConversationComposerImpl({
           }
           disabled={disabled || (mode === "reject" && !recoveryAvailable)}
           submitting={pending}
+          swallowEnterWhileSubmitting={swallowEnterWhileSubmitting}
           submitDisabled={
             pending ||
             (!canReload &&

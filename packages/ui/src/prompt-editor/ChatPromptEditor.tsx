@@ -51,6 +51,8 @@ export function ChatPromptEditor({
   disabledReason,
   submitting = false,
   submitDisabled = false,
+  /** 发送窗口内吞掉裸 Enter（正文仍是冻结的在途提交时）；透传 LexicalChatInput。 */
+  swallowEnterWhileSubmitting,
   allowSubmitWhenEmpty = false,
   enterSubmits = true,
   submitLabel,
@@ -108,6 +110,8 @@ export function ChatPromptEditor({
   disabledReason?: string;
   submitting?: boolean;
   submitDisabled?: boolean;
+  /** 见 LexicalChatInput 同名 prop；ConversationComposer 供判定，防发送窗口 Enter 残留换行。 */
+  swallowEnterWhileSubmitting?: (currentText: string) => boolean;
   allowSubmitWhenEmpty?: boolean;
   enterSubmits?: boolean;
   submitLabel: string;
@@ -358,6 +362,7 @@ export function ChatPromptEditor({
         placeholder={placeholder}
         disabled={disabled}
         submitDisabled={submitDisabled}
+        swallowEnterWhileSubmitting={swallowEnterWhileSubmitting}
         allowSubmitWhenEmpty={allowSubmitWhenEmpty}
         enterSubmits={enterSubmits}
         onSubmit={handleEditorSubmit}
