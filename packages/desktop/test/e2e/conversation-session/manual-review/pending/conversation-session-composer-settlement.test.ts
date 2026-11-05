@@ -251,7 +251,12 @@ describe("CST Composer 首发结算与提示交接", () => {
     const pairingUrl = await obtainUnreadPairingUrl(
       new URL(process.env.ZCODE_WEB_REMOTE_CONTROL_URL!).origin,
     );
-    const mobileBrowser = await chromium.launch({ channel: "chrome", headless: true });
+    // 浏览器 channel 可配：CI/开发机用 chrome；无 Chrome 的环境（如只有 Edge 的
+    // Windows 测试机）传 ZCODE_E2E_MOBILE_BROWSER_CHANNEL=msedge 复用系统 Edge。
+    const mobileBrowser = await chromium.launch({
+      channel: process.env.ZCODE_E2E_MOBILE_BROWSER_CHANNEL ?? "chrome",
+      headless: true,
+    });
     try {
       const context = await mobileBrowser.newContext({
         viewport: { width: 390, height: 844 },
