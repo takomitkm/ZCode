@@ -167,9 +167,10 @@ async function pressEnter() {
 function distinctCommandIds(result: Awaited<ReturnType<typeof probe>>) {
   return new Set(result.commands.map((command) => command.commandId)).size;
 }
-/** 等 pending 状态真实渲染（submitDisabled 生效）后再按第二次 Enter；固定事件顺序而非毫秒竞速。 */
-async function waitPendingWindow(marker: string) {
-  await waitForV4ComposerText(marker, "受理后待结算窗口前置：冻结正文仍在编辑器");
+/** 等「受理即清空」落地并完成 pending 重渲染，再按第二次 Enter；固定事件顺序而非毫秒竞速。 */
+async function waitPendingWindow(_marker?: string) {
+  // 乐观交接契约：提交受理后编辑器立即清空（正文已进冻结快照/提交事务）。
+  await waitForV4ComposerText("", "提交受理后编辑器应立即清空（乐观交接契约）");
   // 等 setPending 的重渲染落地（submitDisabled 真正生效）。
   await browser.pause(500);
 }
@@ -194,9 +195,6 @@ describe("CST Composer 提交进行中的第二次 Enter", () => {
         case: this.currentTest?.title,
         ...(await probe()),
         pane: await getV4PaneSnapshot(),
-        fullHandoffDebug: await browser.execute(() =>
-          (window as unknown as Record<string, unknown>).__fullHandoffDebug ?? null,
-        ),
       });
       await writeFile(
         join(process.env.ZCODE_E2E_ARTIFACT_DIR!, "composer-double-enter.json"),
