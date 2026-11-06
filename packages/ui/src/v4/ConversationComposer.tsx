@@ -1493,7 +1493,9 @@ function ConversationComposerImpl({
       // 草稿首发 accepted 后同一 composer 会原地从 __draft__ promotion 到
       // session scope；若成功清理时再读可变 ref，会误清新 scope，并把首条输入残留在
       // __draft__，下次新建任务又恢复。发送开始时冻结真正提交的 scope。
-      const submissionDraftTransaction = captureComposerSubmissionDraftTransaction(submittedDraft);
+      // 事务对象延后到乐观交接点捕获（store 草稿为防抖滞后同步，过早捕获会让
+      // claim 的 isCurrent 恒假）；捕获失败不得中断发送，故声明为可空。
+      let submissionDraftTransaction: ComposerSubmissionDraftTransaction | null = null;
       const submittedScopeId = draftScopeRef.current;
       const submittedScopeKey = `${workspaceKey}\0${submittedScopeId}`;
       let cleanupRevision = contentRevisionRef.current;
@@ -1585,11 +1587,13 @@ function ConversationComposerImpl({
         // 首发 promotion 会在 onSendText 返回前切换 scope 或重建 Composer。
         // 若仍允许旧 scope effect 落盘，新 Composer 会把已经发送的正文当草稿恢复。
         // 提交前先占用并隐藏该草稿；失败路径再恢复，避免用等待时间掩盖竞态。
-        activeSubmissionDraftTransactionRef.current = submissionDraftTransaction.claim()
-          ? submissionDraftTransaction
-          : null;
+        if (!submissionDraftTransaction) return false;
+        const claimed = submissionDraftTransaction.claim();
+        activeSubmissionDraftTransactionRef.current = claimed ? submissionDraftTransaction : null;
+        return claimed;
       };
       const restoreSubmittedDraft = (awaitsAuthority = false) => {
+        if (!submissionDraftTransaction) return;
         const result = submissionDraftTransaction.restore();
         const shouldRestoreEditor =
           result.applied && result.current && draftScopeRef.current === submittedScopeId;
@@ -1623,6 +1627,7 @@ function ConversationComposerImpl({
         }
       };
       const settleSubmittedContent = async () => {
+        if (!submissionDraftTransaction) return;
         const result = submissionDraftTransaction.finalize();
         if (!result) return;
         activeSubmissionDraftTransactionRef.current = null;
@@ -1662,7 +1667,7 @@ function ConversationComposerImpl({
           ) {
             // 直接 rejected/failed 时 claim 仍持有空草稿；先恢复正文，再释放事务。
             restoreSubmittedDraft();
-            submissionDraftTransaction.release();
+            submissionDraftTransaction?.release();
             activeSubmissionDraftTransactionRef.current = null;
             return;
           }
@@ -1741,11 +1746,30 @@ function ConversationComposerImpl({
             setPromptHistory(promptHistoryAfterAppend);
           }
         }
-        claimSubmittedDraft();
-        if (requestedDelivery === "startNow") {
-          // 原子抢占需要等旧 turn 退出并提交新 TurnStarted ACK；
-          // 若编辑器也等整条链路才清空，用户会误以为快捷键未生效。
-          // 先清空可见正文；命令拒绝时用冻结 editor state 原样恢复。
+        // 完全改造契约：受理即乐观交接。仅当编辑器此刻仍是冻结快照原文
+        // （prepareForSend 等待期间用户未再编辑）才清空：正文/结构已随冻结快照进入
+        // 提交事务，失败/拒绝/待确认由既有 restore 事务原样恢复；用户已续写则不动编辑器。
+        // 事务捕获或 claim 失败一律不得中断发送（正文留在编辑器 = 不丢字），仅记录原因。
+        let editorStillFrozen = false;
+        try {
+          editorStillFrozen =
+            (inputApiRef.current?.getMarkdown() ?? "") === submittedDraft.text;
+        } catch {
+          editorStillFrozen = false;
+        }
+        let claimOk = false;
+        let claimError: string | null = null;
+        try {
+          submissionDraftTransaction = captureComposerSubmissionDraftTransaction(submittedDraft);
+          claimOk = editorStillFrozen && claimSubmittedDraft();
+        } catch (error) {
+          claimError =
+            error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+          submissionDraftTransaction = null;
+          logger.warn("[v4-composer] 草稿事务捕获失败，本次不清空编辑器", error);
+        }
+        if (claimOk) {
+          // 原子抢占与普通发送统一：命令拒绝/失败时用冻结 editor state 原样恢复。
           inputApiRef.current?.clear();
           updateText("");
           cleanupRevision = contentRevisionRef.current;
