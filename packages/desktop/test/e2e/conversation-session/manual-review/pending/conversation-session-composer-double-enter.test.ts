@@ -1,18 +1,18 @@
 // CST06/CST08：提交进行中第二次 Enter 的防残留回归（manual-review/pending）。
 //
-// 背景：普通发送路径在受理后不清空编辑器，要等发送链结算；期间 submitDisabled=true，
-// LexicalChatInput 的 KEY_ENTER_COMMAND 处理链把 Enter 退回给 Lexical 默认行为（插换行），
-// 该换行会把 contentRevision 顶过结算门禁的 cleanupRevision，导致「消息已发出但
-// 正文+换行残留输入框」（详见 packages/ui/src/LexicalChatInput.tsx 主链注释与
-// ConversationComposer.settleSubmittedContent 的 revision 门禁）。
+// 【完全改造契约】（full-handoff 分支，取代方案A的过渡契约）：
+//   1. （本轮先不做）提交受理后立即清空 = 乐观交接；其实现依赖草稿事务 claim，
+//      真实 E2E 上 claim 抛错阻塞发送，需单独定位，故本轮保留既有「结算后清空」。
+//   2. 本次提交在途（pending）期间，裸 Enter 与 Ctrl/⌘+Enter 一律 no-op——不重复提交、
+//      不落成 Lexical 换行（"发送暂不可用"不再被解释成"换行"）；Shift+Enter 与
+//      用户自定义换行键照常换行；IME 组合、候选确认不受影响。
 //
 // 确定性：复用 composer-settlement 用例的 MessagePort 探针，把真实 sendText 命令
-// 暂扣在本地，使「pending 渲染完成之后、结算之前」的竞态窗口变成可稳定进入的状态，
-// 再按第二次物理 Enter；不依赖毫秒级时间窗，也不伪造回执（unknown/accepted 全部由
-// Host/CLI fixture 真实产生）。
+// 暂扣在本地，使「pending 渲染完成之后、结算之前」的窗口变成可稳定进入的状态；
+// 回执（unknown/accepted）全部由 Host/CLI 真实产生。
 //
-// 预期（修复后）：第二次 Enter 被吞掉——不重复发送、不插换行；结算后编辑器为空。
-// 旧行为（无补丁）：结算被 revision 门禁跳过，最终正文=已发送正文+换行 → 本用例红。
+// 红绿预期：方案A构建（只吞"正文未变"的 Enter）上，CST06 红（受理后正文仍可见）、
+// CST08 红（B 被追加换行）；完全改造构建上两例全绿。
 // 探针代码与 conversation-session-composer-settlement.test.ts 同源（case-local 约定）。
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -32,6 +32,7 @@ interface ComposerProbe {
   accepted: string[];
   enters: number;
   frames: Array<{ text: string; placeholder: string | null; sameEditor: boolean }>;
+  wires: string[];
   release(): void;
   restore(): void;
 }
@@ -67,6 +68,7 @@ async function installProbe(hold: boolean) {
         accepted: [],
         enters: 0,
         frames: [],
+        wires: [],
         release() {
           hold = false;
           held.splice(0).forEach((send) => send());
@@ -122,6 +124,9 @@ async function installProbe(hold: boolean) {
           this.addEventListener("message", listener);
         }
         const wire = decode(args[0]);
+        if (probe.wires.length < 40 && !probe.wires.some((w) => w.startsWith(wire.slice(0, 60)))) {
+          probe.wires.push(wire.slice(0, 160));
+        }
         const forward = () => Reflect.apply(original, this, args);
         if (wire.includes("sendConversationCommandV4") && wire.includes('"type":"sendText"')) {
           const commandId = wire.match(/"commandId":"([^"]+)"/)?.[1];
@@ -150,6 +155,7 @@ async function probe() {
       accepted: value.accepted,
       enters: value.enters,
       frames: value.frames,
+      wires: value.wires,
     };
   });
 }
@@ -157,22 +163,14 @@ async function pressEnter() {
   await $(input).click();
   await browser.keys("Enter");
 }
-async function getComposerText() {
-  return browser.execute(
-    (selector) => document.querySelector<HTMLElement>(selector)?.innerText ?? "",
-    input,
-  );
-}
 /** 传输层在 ACK 未达时会原样重发同一命令；「只提交一次」必须按去重后的 commandId 计数。 */
 function distinctCommandIds(result: Awaited<ReturnType<typeof probe>>) {
   return new Set(result.commands.map((command) => command.commandId)).size;
 }
-/** 暂扣发送后，等 pending 状态真实渲染到 DOM，再进入竞态窗口；不是靠固定毫秒碰运气。 */
-async function waitPendingRendered(marker: string) {
-  // 前置不变量：受理后、结算前，已发送正文仍在编辑器（方案 A 吞键版与旧行为一致；
-  // 若将来引入提交即乐观清空，此前置需同步改为「编辑器为空」口径）。
-  await waitForV4ComposerText(marker, "发送受理后正文应仍可见（竞态窗口前置）");
-  // React 对 setPending 的重渲染约一帧；给足余量等 submitDisabled 真正生效。
+/** 等 pending 状态真实渲染（submitDisabled 生效）后再按第二次 Enter；固定事件顺序而非毫秒竞速。 */
+async function waitPendingWindow(marker: string) {
+  await waitForV4ComposerText(marker, "受理后待结算窗口前置：冻结正文仍在编辑器");
+  // 等 setPending 的重渲染落地（submitDisabled 真正生效）。
   await browser.pause(500);
 }
 async function waitComplete() {
@@ -196,6 +194,9 @@ describe("CST Composer 提交进行中的第二次 Enter", () => {
         case: this.currentTest?.title,
         ...(await probe()),
         pane: await getV4PaneSnapshot(),
+        fullHandoffDebug: await browser.execute(() =>
+          (window as unknown as Record<string, unknown>).__fullHandoffDebug ?? null,
+        ),
       });
       await writeFile(
         join(process.env.ZCODE_E2E_ARTIFACT_DIR!, "composer-double-enter.json"),
@@ -219,8 +220,8 @@ describe("CST Composer 提交进行中的第二次 Enter", () => {
       timeout: 15_000,
       timeoutMsg: "没有截获待释放的首发命令",
     });
-    await waitPendingRendered(marker);
-    // 第二次物理 Enter：旧行为在此插入换行并顶掉结算清空；修复后被吞掉。
+    await waitPendingWindow(marker);
+    // 第二次物理 Enter：pending 中应被 no-op——不重复提交、不插换行。
     await pressEnter();
     await browser.execute(() => window.__composerDoubleEnterProbe!.release());
     await waitComplete();
@@ -231,7 +232,7 @@ describe("CST Composer 提交进行中的第二次 Enter", () => {
     expect(new Set(result.accepted).size).toBe(1);
   });
 
-  it("CST08 提交进行中续写新草稿并按 Enter：追加一个换行、B 不误发、旧消息只结算一次", async function () {
+  it("CST08 提交进行中续写新草稿并按 Enter：不误发、不换行、草稿原样保留（完全改造契约）", async function () {
     this.timeout(90_000);
     await startDraftFromProject(DEFAULT_WORKSPACE);
     await installProbe(true);
@@ -241,20 +242,15 @@ describe("CST Composer 提交进行中的第二次 Enter", () => {
       timeout: 15_000,
       timeoutMsg: "没有截获待释放的首发命令",
     });
-    await waitPendingRendered("E2E_COMPOSER_SETTLEMENT_DRAFT_B_A");
-    // 现行契约（方案 A 范围）：pending 中对「新续写的草稿」按 Enter 不提交，
-    // 但保留 Lexical 换行语义——B 追加恰好一个换行；不得清空、不得误发 B。
-    // 完整改造（忙碌 Enter=queue/steer/no-op）落地时本例需同步收紧为无操作。
+    await waitPendingWindow("E2E_COMPOSER_SETTLEMENT_DRAFT_B_A");
+    // 完全改造契约：pending 中对「新续写的草稿」按 Enter = no-op——不提交、
+    // 不插换行、不清空；B 一字不动，等旧消息结算后仍可由用户自行发送。
+    // （方案A过渡契约「追加恰好一个换行」已由完全改造取代。）
     await setV4ComposerText("B draft during pending");
     await pressEnter();
     await browser.execute(() => window.__composerDoubleEnterProbe!.release());
     await waitComplete();
-    await browser.waitUntil(
-      async () => (await getComposerText()).trim() === "B draft during pending",
-      { timeout: 10_000, timeoutMsg: "新草稿不得被清空或丢失" },
-    );
-    const draftText = await getComposerText();
-    expect(draftText.endsWith("\n") && !draftText.endsWith("\n\n")).toBe(true);
+    await waitForV4ComposerText("B draft during pending", "新草稿不得被换行污染、清空或丢失");
     const result = await probe();
     expect(result.enters).toBe(2);
     expect(distinctCommandIds(result)).toBe(1);
