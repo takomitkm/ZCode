@@ -530,7 +530,7 @@ function KeyboardPlugin({
   submitDisabled?: boolean;
   allowSubmitWhenEmpty?: boolean;
   enterSubmits: boolean;
-  /** submitDisabled 且正文仍是冻结的在途提交（或已空）时吞掉裸 Enter，防止残留换行。 */
+  /** submitDisabled 且业务层判定存在在途提交时吞掉 Enter（裸/Ctrl/⌘+），防残留换行。 */
   swallowEnterWhileSubmitting?: (currentText: string) => boolean;
 }) {
   const [editor] = useLexicalComposerContext();
@@ -575,19 +575,18 @@ function KeyboardPlugin({
           return false;
         }
         if (scopedAction === "send") {
+          // 完全改造契约：本次提交在途（pending）时，裸 Enter 与带修饰 Enter 一律 no-op
+          // ——"发送暂不可用"不再退回 Lexical 插换行（编辑器已乐观清空，新草稿原样保留）。
+          if (submitDisabled && swallowEnterWhileSubmittingRef.current?.(text)) {
+            event.preventDefault();
+            return true;
+          }
           const modifiedScopedEnter = event.shiftKey || event.ctrlKey || event.metaKey;
           // 反转投递开启时带修饰组合让位主链（Ctrl+Enter = 反向 delivery，交付语义比键位更具体）
           if (!(modifiedScopedEnter && onModifiedSubmit)) {
             // 与主链裸 Enter 等价的门禁：无修饰组合受 submitDisabled / 手机视口 enterSubmits；
             // 带修饰组合不受视口门禁（与主链 onModifiedSubmit 路径一致）。
             if (submitDisabled || (!modifiedScopedEnter && !enterSubmits)) {
-              // 发送窗口内且正文仍是冻结的在途提交（或已空）→ 吞掉 Enter：
-              // 普通发送路径此时还没清空编辑器，放行 Lexical 会把换行插进刚发出的正文，
-              // 且 revision 推进会让 composer 的结算门禁跳过清空（正文+换行残留）。
-              if (submitDisabled && swallowEnterWhileSubmittingRef.current?.(text)) {
-                event.preventDefault();
-                return true;
-              }
               return false;
             }
             event.preventDefault();
@@ -640,14 +639,20 @@ function KeyboardPlugin({
 
         // Shift+Enter，以及未启用反转投递时的 Ctrl/Meta+Enter 继续换行。
         if (event.shiftKey || event.ctrlKey || event.metaKey) {
+          // 完全改造契约：pending 中 Ctrl/Meta+Enter 同样 no-op（不落成换行）；
+          // Shift+Enter 是显式换行键，不受发送锁影响。
+          if (!event.shiftKey && submitDisabled && swallowEnterWhileSubmittingRef.current?.(text)) {
+            event.preventDefault();
+            return true;
+          }
           return false;
         }
 
         // 当前请求进行中时，输入框仍允许继续编辑草稿，但此时不能再次提交。
         // 之前把状态直接映射成 disabled，导致输入和联想面板一起失效；如果只去掉 disabled，
-        // Enter 又会误触发 submit 并清空草稿。这里在 submitDisabled 时把 Enter 退回给 Lexical 处理换行。
-        // 例外：正文仍是冻结的在途提交（或已空）时吞掉 Enter，否则换行会插进
-        // 尚未清空的已发正文里并阻断 composer 的结算清空（双击回车残留 bug）。
+        // Enter 又会误触发 submit 并清空草稿。完全改造契约：pending 中裸 Enter 一律
+        // no-op（不提交、不落成换行）；其余 submitDisabled 场景（运行时封锁等）保留
+        // 退回 Lexical 换行的既有续写体验。
         if (submitDisabled || !enterSubmits) {
           if (submitDisabled && swallowEnterWhileSubmittingRef.current?.(text)) {
             event.preventDefault();
@@ -1463,10 +1468,10 @@ interface LexicalChatInputProps {
   disabled?: boolean;
   submitDisabled?: boolean;
   /**
-   * 发送窗口内的裸 Enter 吞键判定：submitDisabled 且该函数返回 true 时，
-   * Enter 被消费（不提交、不落 Lexical 默认换行）。业务层用「正文 === 在途提交冻结正文或为空」
-   * 实现，防止双击回车把换行插进尚未清空的已发正文并阻断结算清空；
-   * 用户已续写新草稿（内容变化）时返回 false，保留「进行中可换行续写」的原有设计。
+   * 发送窗口（本次提交在途）内的 Enter 吞键判定：submitDisabled 且该函数返回 true 时，
+   * 裸 Enter 与 Ctrl/⌘+Enter 一律被消费（不提交、不落成 Lexical 默认换行）——
+   * 完全改造契约："发送暂不可用"不再被解释成换行。业务层实现为「存在在途提交」；
+   * Shift+Enter 与用户自定义换行键是显式换行，不走此判定、不受发送锁影响。
    */
   swallowEnterWhileSubmitting?: (currentText: string) => boolean;
   allowSubmitWhenEmpty?: boolean;

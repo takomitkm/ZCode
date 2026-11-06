@@ -1926,14 +1926,12 @@ function ConversationComposerImpl({
     });
   }, [conversationTelemetry, sessionId]);
 
-  // 发送窗口内吞掉裸 Enter：此时普通发送路径尚未乐观清空，编辑器里还是刚发出的正文，
-  // Enter 落到 Lexical 默认行为会插入换行，并把 contentRevision 推过 cleanupRevision，
-  // 结算门禁随后跳过清空 → 「消息已发出但正文+换行残留输入框」。
-  // 仅当编辑器内容仍是冻结的那份（或已空）才吞；用户已开始续写新草稿则照常换行。
+  // 发送窗口（本次提交在途）内吞掉 Enter——完全改造契约：
+  // pending 期间裸 Enter 与 Ctrl/⌘+Enter 一律 no-op，"发送暂不可用"不再被解释成换行；
+  // 编辑器已由乐观交接清空，用户续写的新草稿一字不动保留，结算后可自行发送。
+  // Shift+Enter 与自定义换行键是显式换行，不受发送锁影响。
   const swallowEnterWhileSubmitting = useCallback(
-    (currentText: string) =>
-      inFlightSubmittedTextRef.current !== null &&
-      (currentText === inFlightSubmittedTextRef.current || currentText.trim() === ""),
+    () => inFlightSubmittedTextRef.current !== null,
     [],
   );
 
